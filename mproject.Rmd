@@ -1,0 +1,554 @@
+---
+title: "Applied Data Science:  Midterm Project"
+author: "Xiaomeng Huang, Xinyue Li, Lu Yin"
+date: ""
+output:
+  prettydoc::html_pretty:
+  theme: cayman
+highlight: github
+---
+
+```{r setup, include=FALSE,echo=F}
+set.seed(72)
+knitr::opts_chunk$set(echo = TRUE, comment="", warning = FALSE, message = FALSE, tidy.opts=list(width.cutoff=55))
+```
+
+```{r libraries, echo = FALSE}
+library(data.table)
+library(DT)
+library(glmnet)
+library(mgcv)
+library(dplyr)
+```
+
+```{r source_files,echo=F}
+train.file<-"Data/MNIST-fashion training set-49.csv"
+test.file<-"Data/MNIST-fashion testing set-49.csv"
+```
+
+```{r functions,echo=F}
+
+round.numerics <- function(x, digits) {
+  if (is.numeric(x)) {
+    x <- round(x = x, digits = digits)
+    }
+  return(x)
+}
+
+
+#sampling for a single size
+sampling <- function(data, sample.size){
+  index <- sample(nrow(data), sample.size, replace = FALSE)
+  sample <- data[index,]
+  return(sample)
+}
+
+
+#create a constant formula
+create.formula <- function(outcome.name, input.names, input.patterns = NA, all.data.names = NA, return.as = "character") {
+  variable.names.from.patterns <- c()
+  if (!is.na(input.patterns[1]) & !is.na(all.data.names[1])) {
+    pattern <- paste(input.patterns, collapse = "|")
+    variable.names.from.patterns <- all.data.names[grep(pattern = pattern, x = all.data.names)]
+  }
+    all.input.names <- unique(c(input.names, variable.names.from.patterns))
+    all.input.names <- all.input.names[all.input.names != outcome.name]
+  if (!is.na(all.data.names[1])) {
+    all.input.names <- all.input.names[all.input.names %in% all.data.names]
+  }
+    input.names.delineated <- sprintf("`%s`", all.input.names)
+    the.formula <- sprintf("`%s` ~ %s", outcome.name, paste(input.names.delineated, collapse = " + "))
+  if (return.as == "formula") {
+    return(as.formula(the.formula))
+  }
+  if (return.as != "formula") {
+    return(the.formula)
+  }
+}
+
+
+#create x and y matrix from dataset for modeling
+create.x.and.y <- function(the.formula, data) {
+  require(data.table)
+  setDT(data)
+  x <- model.matrix(object = as.formula(the.formula), data = data)
+  y.name <- trimws(x = gsub(pattern = "`", replacement = "", x = strsplit(x = the.formula, split = "~")[[1]][1], fixed = TRUE))
+  y <- data[as.numeric(rownames(x)), get(y.name)]
+  return(list(x = x, y = y))
+}
+
+
+#iterate single model across data list
+iteration.train<-function(model.number, the.formula, dat.list, test.data){
+  model.name <- sprintf("model%s", model.number)
+  model.result <- NULL
+  for (i in 1:length(dat.list)){
+    model <- do.call(model.name, list(the.formula=the.formula,training.data=dat.list[[i]],test.data=test.data))[[1]]
+    model.result <-rbindlist(l=list(model.result, model),fill=TRUE) 
+  }
+  return(model.result)
+}
+
+
+#assess the model performance on single training data
+assess <- function(start, end, training.data, test.class, predicted){
+  time <- end - start
+  A <- nrow(training.data)/n.train
+  B <- min(1, time/60)
+  C <- mean(test.class != predicted)
+  sample.size <- nrow(training.data)
+  return(data.table("Sample Size"=sample.size, "A"=A, "B"=B, "C"=C))
+}
+
+
+#get score of assessment
+scoring <- function(dat){
+  for(i in 1:nrow(dat)){
+  dat[i, "Points" := 0.25*as.numeric(A) + 0.25*as.numeric(B) + 0.5*as.numeric(C)]
+  }
+  dat[,"Data" := dat.name.list]
+  return(dat)
+}
+
+#report score board
+report<-function(dat){
+  require(data.table)
+  datatable(data=dat[,lapply(X=.SD,FUN="round.numerics",digit=4)],rownames=FALSE)
+}
+
+
+max.accuracy=function(pred){
+  accuracy=NULL
+  for (i in 1:ncol(pred)){
+    accuracy[i]= 1 - mean(pred[,i] != test.data$label)
+  }
+  model.number=which.max(accuracy)
+  return(model.number)
+}
+
+
+score.sum=function(file){
+  reportsum=file[, lapply(X=.SD, FUN="mean", na.rm=TRUE), by=list(Model,`Sample Size`), .SDcols = c("A","B","C","Points")]
+  setorder(reportsum,Points)
+  return(reportsum)
+}
+
+```
+
+```{r load_data, echo=F}
+setwd("C:/Users/57396/OneDrive/Documents/Semester 2/Applied ds/Midterm")
+train.data <- fread(file=train.file)
+test.data <- fread(file=test.file)
+```
+
+```{r clean_data, echo=F}
+#check label values
+level <- train.data[, unique(label)]
+#convert character label to factor
+train.data$label <- factor(train.data$label)
+test.data$label <- factor(test.data$label)
+#check missing value
+missingnum <- sum(is.na(train.data)) #no missing data
+#check pixel range if in 0-255
+prange <- range(train.data[,-1])
+```
+
+```{r constants, echo=F}
+n.values <- c(500, 1000, 2000)
+iterations <- 3
+the.formula <- create.formula(outcome.name=names(train.data)[1],input.name=names(train.data)[-1])
+n.train <- nrow(train.data)
+```
+
+```{r generate_samples, echo=F}
+size.list <- rep(n.values, each=iterations)
+dat.list <- lapply(size.list, sampling, data=train.data)
+dat.name.list <- paste0("data_", rep(n.values, each=iterations), "_", rep(1:iterations, by=iterations))
+```
+
+## Introduction
+
+<p>This paper is to find the best machine learning model to recognize different type of apparel. Given a set of image with know classification, the model could predict the classification of a new picture. The data set is from MINST data-set with total 60,000 records in 10 different groups. Each picture is divided into 49  (7 by 7) pixels which means we have 49 different predictors. </p>
+
+
+<p>Our first step is to do data preparation. We check the data that there is no missing data and all pixels are between 0 to 255 which matches the nature of pixels. In order to make us convenient  to build the model, we change the label into factor. Then we sample the data-set. The size of the training data is set to 500, 1000, 2000. For each size, we have three different sample without replacement. Then we train 10 models with this 9 data-sets.</p>
+
+
+<p>**Labels** : `r level`<br>
+**Range of Pixels**: `r prange`<br>
+**Number of missing record**: `r missingnum`</p>
+
+
+<p>Data size, time complexity and classification error are the three measures in our model selection. Increasing data size will help to reduce the classification error while increasing the time complexity. With consideration of trade of data size, time used and prediction accuracy, we try to use the formula :<br> <center> **Points = 0.25 \times A + 0.25 \times B + 0.5 \times C** </center>
+where <br> **A** is the proportion of the training rows that is utilized in the model. For instance, if we use 30,000 of the 60,000 rows, then A = 30,000 / 60,000 = 0.5; <br> **B** = min(1,t/60), where t is the running time of the selected algorithm in seconds; <br>  **C** is the proportion of the predictions on the testing set that are incorrectly classifiedto <br >to find the best model in predictive classification. </p>
+
+<p>
+In the following, we will creat 10 different models: Multinominal Logistic Regression, Classification Tree, Random Forest, Linear Discriminant Analysis, Support Vector Machine,Lasso Regression, Ridge Regression, K-Nearest Neighbor, an ensembling model integrated LDA, random forest and KNN, and Neural Networks with single layer.
+</p>
+
+### Model 1: Multinominal 
+
+<p>Similar to linear regression ,multinominal logistic regression is a common method used when the dependent variable is nominal with more than two outcomes. It does not need to check for normality, linearity, or homoscedasticity[1], but it assumes that the outcomes are independent, and there are not co linearity between independent variables. The prediction result is the probability that the data belongs to each category. It assigns a data to a group with the highest probability. We could see that this algorithm runs very fast. Even it runs 100 iterations each time by default, it just cause several seconds. However, the accuracy is not very well, there always are around more than 20% error.</p>
+
+```{r code_model1_development, eval = F}
+model1 <- function(the.formula, training.data, test.data) {
+  library(nnet)
+  tic <- Sys.time()
+  mod <- multinom(formula=as.formula(the.formula), dat=training.data, trace=F)
+  pred <- predict(object=mod, newdata=test.data)
+  toc <- Sys.time()
+  
+  assessment <- assess(tic, toc, training.data, test.data$label, pred)
+  dat <- data.table("Model"="Multinominal Logistic Regression", assessment)
+  return(list(data=dat, pred=pred))
+}
+
+dat.model1 <- iteration.train(model.number=1, the.formula, dat.list, test.data)
+scoring(dat.model1)
+saveRDS(dat.model1,"mod1.rds")
+```
+
+
+```{r load_model1, echo=F}
+report(readRDS("mod1.rds"))
+```
+
+
+### Model 2:  Classification Tree
+
+Classification tree could predict help to predict categorical outcomes. It applies recursive binary splitting to grow a tree. The most commonly occurring label in each leaf drives the prediction.The big advantage of classification tree is that it is easy to interpret. However, it has a tendency to over-fit which cause a high variance. The variance could be partially reduced through random forest which will be introduced next. In this model, we use "method=class" in training and "type=class" in prediction which means this is a classification tree not regression tree. We could see that the time used in this algorithm is not too long but the prediction is also not well.
+
+```{r code_model2_development, eval = F}
+model2<-function(the.formula,training.data,test.data){
+  library(rpart)
+  tic <- Sys.time()
+  mod <- rpart(formula=the.formula,dat=training.data,method="class")
+  pred <- predict(object=mod,newdata=test.data,type="class")
+  toc <- Sys.time()
+  
+  assessment <- assess(tic, toc, training.data, test.data$label, pred)
+  dat <- data.table("Model"="Classification Tree", assessment)
+  return(list(data=dat, pred=pred))
+}
+
+dat.model2 <- iteration.train(model.number=2, the.formula, dat.list, test.data)
+scoring(dat.model2)
+saveRDS(dat.model2,"mod2.rds")
+```
+
+```{r load_model2, echo=F}
+report(readRDS("mod2.rds"))
+```
+
+### Model 3: Random Forest 
+
+<p>Random forest is a tree-based algorithm which aggregates several trees. It fits a classification tree to many different bootstrap training data set. In each step, it randomly select a subset of features (m of p predictors) to be used to make several trees very differential. Then by averaging the prediction of each tree, we could get the final result. In the prediction, we use type="response" instead of "prob" or "vote" to get the predicted value. </p>
+
+<p>Using a small value of m in building a random forest will typically be helpful when we have a large number of correlated predictors, according to James [3], and typically we choose $m\approx \sqrt p$. Since we have 49 predictors, we decide to set the tuning parameter "mtry" to 10. Also, we set the "ntree" to 200 to balance out the stabilization and the problem of overfit.</p>
+
+<p>We could see from the result, this method definitely helps to improve the classification error compared with classification tree method, while increasing the time complexity.</p>
+
+```{r code_model3_development, eval = FALSE}
+model3<-function(the.formula, training.data, test.data){
+  library(randomForest)
+  tic <- Sys.time()
+  mod <- randomForest(formula=as.formula(the.formula),dat=training.data, mtry=10, ntree=200)
+  pred <- predict(object=mod,newdata=test.data,type="response")
+  toc <- Sys.time()
+  
+  assessment <- assess(tic, toc, training.data, test.data$label, pred)
+  dat <- data.table("Model"="Random Forest", assessment)
+  return(list(data=dat, pred=pred))
+}
+
+dat.model3 <- iteration.train(model.number=3, the.formula, dat.list, test.data)
+scoring(dat.model3)
+saveRDS(dat.model3,"mod3.rds")
+```
+
+```{r load_model3, echo=F}
+report(readRDS("mod3.rds"))
+```
+
+### Model 4: LDA
+
+<p>For multiple-class classification, discriminant analysis is more often used compared to logistic regression. In this approach, the distribution of the predictors X is modeled separately in each of the response classes, $f_k(x)$, and then use Bayes' theorem to estimate the probability of each class by $Pr(Y=k|X=x)=\frac{\pi_k f_k(x)}{f(x)}$ [3]. LDA assumes that $X =(X_1,X_2,...,X_p)$ is drawn from a multivariate normal distribution with a class-specific mean vector and a common covariance matrix. The decision boundary hence results in a linear one.</p>
+
+<p>When predictors are approximately normally distributed and share common covariance matrix, LDA leads to a more accurate and stable result. Conversely, it would worse off when assumptions were not met. Then we should consider QDA, which assumes that each class has its own covariance matrix and results in a quadratic decision boundary, or a more flexible non-parametric method like KNN-CV. In addition, LDA has problem of overfit as well.</p>
+
+
+```{r code_model4_development, eval = F}
+model4 <- function(the.formula, training.data,test.data) {
+  library(MASS)
+  training.data <- as.data.frame(training.data)
+  
+  tic <- Sys.time()
+  mod <- lda(as.formula(the.formula), data=training.data)
+  pred <- predict(mod, test.data)
+  toc <- Sys.time()
+  
+  assessment <- assess(tic, toc, training.data, test.data$label, pred$class)
+  dat <- data.table("Model"="Linear Discriminant Analysis", assessment)
+  return(list(data=dat, pred=pred))
+}
+
+dat.model4 <- iteration.train(model.number=4, the.formula, dat.list, test.data)
+scoring(dat.model4)
+saveRDS(dat.model4, "mod4.rds")
+```
+
+```{r load_model4, echo=F}
+report(readRDS("mod4.rds"))
+```
+
+<p>For our data, LDA performs pretty well. I would think the normal assumption is violated for some of our predictors, as pixel values near the edge of each image are skewed to 0 due to blank area. However, the prediction result still outperforms some of other methods. The implementation is extremely easy since we do not need to tune any parameters, which also saves implementing time. The result generated for each size is stable and our assessing score improves as the size of training data increased from 500 to 2000. Overall, LDA is a good, simple model for our data.</p>
+
+
+### Model 5: Linear SVM
+
+<p>Support vector machine is an intuitive and popular technique for classification. It is an extension of maximal margin classifier, which uses the separating hyperplane that maximizing the smallest margin from each class as a classifier with allowance of misclassification to ensure the existence of a separable hyperplane. The misclassification cases are controlled by a tuning parameter C, which works as a budget of total misclassifications. 
+
+One drawback of SVM is that the classifier is sensitive to support vectors. Few points near the margin of one class can directly change the classifier. Also, there is trade-of between bias and variance of the classification. When C is small, the margins are narrow; the classifier is highly fit to the data, which may have low bias but high variance. When C is large, the margins become wider; more misclassification is allowed, so we may have lower variance but comes in a cost of higher bias. However, SVM could accommodate to non-linear boundaries by using kernel trick, which is a lot more flexible and could have a more widely application.</p>
+
+<p>The package "e1071" is used to implement the SVM. Since the linear boundary works generally fine as shown from previous results, I chose using "polynomial" boundary instead of "radial." The tuning parameter "Cost" is chosen by 10-fold cross-validation on a wide range of values. Since SVM only applies to binary classification, we will firstly carry out pairwise classification and then make the final prediction by a voting mechanism, for which a one-against-one approach is applied in the package[2]. 
+
+```{r code_model5_development, eval = F}
+model5 <- function(the.formula, training.data, test.data){
+  library(e1071)
+  training.data <- as.data.frame(training.data)
+  
+  tic <- Sys.time()
+  tune.out <- tune(svm, as.formula(the.formula), data=training.data, kernel="polynomial", ranges=list(cost=seq(10,30,by=5))) 
+  best.model <- tune.out$best.model 
+  pred <- predict(best.model, test.data)
+  toc <- Sys.time()
+
+  assessment <- assess(tic, toc, training.data, test.data$label, pred)
+  dat <- data.table("Model"="Support Vector Machine", assessment)
+  return(list(data=dat, pred=pred))
+}
+
+dat.model5 <- iteration.train(model.number=5, the.formula, dat.list, test.data)
+scoring(dat.model5)
+saveRDS(dat.model5,"mod5.rds")
+```
+
+```{r load_model5, echo=F}
+report(readRDS("mod5.rds"))
+```
+<p>Performing on our data, error rates are relatively low and accuracy improves obviously when training data size increases. However, due to parameter tuning and pairwise classification process, it is very time consuming. Hence, the overall assessing score is worsening off when training set becomes larger. Therefore, in practical setting, this might not be the optimal model for multi-classification when data is large and time is concerned. </p>
+
+
+### Model 6 Ridge
+
+<p>To further extent the multinomial logistic regression to improve prediction accuracy, ridge regression is a nice approach to reduce the variability in the least squares fit and consequently reduces the problem of overfitting. Particularly, it is minimizing RSS plus a penalty term, which has the effect of shrinking the estimated coefficients towards 0 [3]. A non-negative tuning parameter lambda serves to control; as lambda going larger, shrinkage penalty grows bigger. </p>
+
+<p>Ridge regression benefits the prediction especially when n is not much larger than p, where high variance happens most likely. However, reducing the variance trades for a higher bias. Also as demonstrated by James [3], beyond some point, the efficiency of increasing lambda slows, so decreasing little in variance resulting in a large increase in the bias. Therefore, the choice of lambda is critical. This will be an implementation disadvantage since we need to fit the model with a list of lambda values and perform CV searching for the optimal value, which is time-expensive.</p>
+
+<p>By limiting lambda on 6 degree levels, with total 60 values, a 10-fold CV was performed for evaluation. The prediction results are obviously improved comparing to regular multinomial logistic regression, while implementing time increased as expected. However, the overall score still improved.</p>
+
+
+```{r code_model6_development, eval = FALSE}
+model6 <- function(the.formula, training.data, test.data){
+  library(glmnet)
+  train.mat <- create.x.and.y(the.formula, training.data)
+  
+  tic <- Sys.time()
+  #fit model on a list of lamda  
+  grid <- 10^seq(3,-3, length = 60) 
+  mod <- glmnet(train.mat$x[,-1], as.numeric(train.mat$y), family = "multinomial", alpha = 0, lambda = grid)
+  #select lambda by 10-fold CV
+  cv.out <- cv.glmnet(train.mat$x[,-1], as.numeric(train.mat$y), alpha=0, lambda = grid) 
+  bestlam <- cv.out$lambda.min
+  #prediction
+  pred <- predict(mod, as.matrix(test.data[, -1]), type = "class", s=bestlam)
+  toc <- Sys.time()
+  
+  assessment <- assess(tic, toc, training.data, as.numeric(test.data$label), pred)
+  dat <- data.table("Model"="Ridge Regression", assessment)
+  return(list(data=dat, pred=pred))
+}
+
+dat.model6 <- iteration.train(model.number=6, the.formula, dat.list, test.data)
+scoring(dat.model6)
+saveRDS(dat.model6,"mod6.rds")
+```
+
+```{r load_model6, echo=F}
+report(readRDS("mod6.rds"))
+```
+
+### Model 7 Lasso
+
+<p>One limitation of ridge regression is that it includes all p predictors. The lasso regression is similar with ridge regression except it uses different penalty term, which can force some of estimated coefficients to exactly 0 [3]. Hence, the lasso also performs variable selection. This is an advantage when there are too many predictors and we want to exclude some irrelevant variables to reduce unnecessary model complexity.
+Using same grid for lambda values as ridge regression, a 10-fold CV was performed. The results are very similar with ridge regression. The accuracy slightly improved, but the time cost increased, so the overall score are about the same. </p>
+
+
+```{r code_model7_development,eval = F}
+model7 <- function(the.formula, training.data, test.data){
+  library(glmnet)
+  train.mat <- create.x.and.y(the.formula, training.data)
+  
+  tic <- Sys.time()
+  #fit model on a list of lamda  
+  grid <- 10^seq(3,-3, length = 60) 
+  mod <- glmnet(train.mat$x[,-1], as.numeric(train.mat$y), family = "multinomial", alpha = 1, lambda = grid)
+  #select lambda by 10-fold CV
+  cv.out <- cv.glmnet(train.mat$x[,-1], as.numeric(train.mat$y), alpha=1, lambda = grid) 
+  bestlam <- cv.out$lambda.min
+  #prediction
+  pred <- predict(mod, as.matrix(test.data[, -1]), type = "class", s=bestlam)
+  toc <- Sys.time()
+  
+  assessment <- assess(tic, toc, training.data, as.numeric(test.data$label), pred)
+  dat <- data.table("Model"="Lasso Regression", assessment)
+  return(list(data=dat, pred=pred))
+}
+
+dat.model7 <- iteration.train(model.number=7, the.formula, dat.list, test.data)
+scoring(dat.model7)
+saveRDS(dat.model7,"mod7.rds")
+```
+
+```{r load_model7, echo=F}
+report(readRDS("mod7.rds"))
+```
+
+### Model 8 K-Nearest Neighbors
+
+<p>K-Nearest Neighbors is the simplest and best-known non-parametric method. It doesn't make any assumptions on data distribution, and therefore provide a more flexible approach for classification problem. Given a test observation x, the KNN classifier first identifies the K points in the training data that are most close to x based on distance. It then estimates the class of test observation using majority vote. To avoid tie, it's reasonable to set K as an odd number. As K grows, the method becomes less flexible and produces a decision boundary that is close to linear, corresponding to low-variance and high-biased classifier. [3] </p>
+
+<p>Euclidean distance function is the most commonly used one in KNN model, which is what we used here. Since KNN needs to calculate distances between a test observation and each one of the observations in training data, it's computationally expensive. The best K can be obtained by using cross validation, but this would take extra running time. Based upon these, a small odd number should be good for our KNN model. So here we choose k=5. </p>
+
+
+```{r code_model8_development,eval = F}
+model8<-function(the.formula,training.data,test.data=test.data){
+  library(class)
+  tic <- Sys.time()
+  x.y.train <- create.x.and.y(the.formula = the.formula, data=training.data)
+  x.y.test <- create.x.and.y(the.formula = the.formula, data=test.data)
+  pred <- knn(train=x.y.train$x, test=x.y.test$x,cl=x.y.train$y, k=5)
+  toc <- Sys.time()
+  
+  assessment <- assess(tic, toc, training.data, test.data$label, pred)
+  dat <- data.table("Model"="KNN", assessment)
+  return(list(data=dat, pred=pred))
+}
+
+dat.model8 <- iteration.train(model.number=8, the.formula, dat.list, test.data)
+scoring(dat.model8)
+saveRDS(dat.model8,"mod8.rds")
+```
+
+```{r load_model8, echo=F}
+report(readRDS("mod8.rds"))
+```
+
+### Model 9 Ensemble 
+
+<p>Ensemble classifiers pool the predictions of multiple base models. Much empirical and theoretical evidence has shown that model combination increases predictive accuracy. [4] Here we chose random forest, LDA and KNN as base models. The prediction of the ensemble model was generated by predictions of base models based on majority vote. When a tie occurs, we chose to use the prediction from the base model with the highest accuracy. </p>
+
+<p>The ensemble model is expected to have a better performance than base models. According to the results we obtained, the ensemble has a good performance but doesn't always outperform base models. For example, if the random forest made the right prediction, but both LDA and KNN made the same wrong prediction, based on majority vote, the final result would be incorrect. This could decrease the accuracy of our ensemble model. </p>
+
+
+```{r code_model9_development, eval = F}
+model9<-function(the.formula,training.data,test.data=test.data){
+  library(class)
+  library(MASS)
+  library(randomForest)
+  tic <- Sys.time()
+  
+  x.y.train=create.x.and.y(the.formula = the.formula,data=training.data)
+  x.y.test=create.x.and.y(the.formula = the.formula,data=test.data)
+  pred1<-knn(train=x.y.train$x,test=x.y.test$x,cl=x.y.train$y,k=5)
+  rf.mod<-randomForest(formula=as.formula(the.formula),dat=training.data, mtry=10, ntree=200)
+  pred2=predict(rf.mod,test.data,type="response")
+  lda.mod<-lda(as.formula(the.formula), data=training.data)
+  pred3=predict(lda.mod,test.data)$class
+  pred1=as.character(pred1);pred2=as.character(pred2);pred3=as.character(pred3)
+  pd= cbind(pred1,pred2,pred3)
+  
+  modnum=max.accuracy(pd)
+  mv=function(x){
+    tabsum=table(x)
+    if(length(tabsum)>3){pred=names(which.max(tabsum))}
+    else{pred=x[modnum]}
+    return(pred)
+ }
+  pred=apply(pd,1,mv)
+  toc <- Sys.time()
+
+  assessment <- assess(tic, toc, training.data, test.data$label, pred)
+  dat <- data.table("Model"="Ensemble", assessment)
+  return(list(data=dat, pred=pred))
+}
+
+dat.model9 <- iteration.train(model.number=9, the.formula, dat.list, test.data)
+scoring(dat.model9)
+saveRDS(dat.model9,"mod9.rds")
+
+```
+
+```{r load_model9, echo=F}
+report(readRDS("mod9.rds"))
+```
+
+### Model 10 Single Layer Neural Networks
+
+<p> A single hidden layer neural network consists of 3 layers: input, hidden and output.
+The input layer has all the values form the input, in our case numerical representation of
+pixels. In the hidden layer is where most of the calculations happens, every Perceptron unit takes an input from the input layer, multiplies and add it to initially random values. This initial output is not ready yet to exit the perceptron, it has to be activated by a function, in this case a ReLu function. The last and third layer is the output layer, it takes all the previous layer Perceptrons as input and multiplies and add their outputs to initially random values. then gets activated by a Sigmoid function. </p>
+
+<p> Typically the number of hidden units is somewhere in the range of 5 to 100, with the number increasing with the number of inputs and number of training cases. Some researchers use cross-validation to estimate the optimal number, but this seems unnecessary if cross-validation is used to estimate the regularization parameter. [5]. Considering the data size and running time, here we set the number of hidden units to be 6.  Neural Network methods generally work well on large data size. So it's not surprising to see that in our case it's not performing well.</p>
+
+```{r code_model10_development, eval = FALSE}
+model10<-function(the.formula,training.data,test.data=test.data){
+  library(nnet)
+  
+  tic <- Sys.time()
+  training.data$label=as.factor(training.data$label)
+  mod <- nnet(formula=as.formula(the.formula), data=training.data, size=6,trace=F)
+  pred <- predict(mod,test.data,type="class")
+  toc <- Sys.time()
+  
+  assessment <- assess(tic, toc, training.data, test.data$label, pred)
+  dat <- data.table("Model"="Neural Networks", assessment)
+  return(list(data=dat, pred=pred))
+}
+
+dat.model10 <- iteration.train(model.number=10, the.formula, dat.list, test.data)
+scoring(dat.model10)
+saveRDS(dat.model10,"mod10.rds")
+```
+
+```{r load_model10, echo=F}
+report(readRDS("mod10.rds"))
+```
+
+## Scoreboard
+
+```{r scoreboard,echo=F}
+files=list.files(pattern = '.rds')
+dat_list=lapply(files, function(x) data.table(readRDS(x)))
+sumreport=rbindlist(dat_list,fill = T)
+report(sumreport)
+```
+
+```{r,echo=F}
+report(score.sum(sumreport))
+```
+
+## Discussion
+<p>Here is our final result after averaging the performance on each sample size for each model. In order of overall score, random forest and LDA are leading ahead, resulting in our ensembled model doing well too. On the other side, classification tree and neural networks are left at the bottom of choice. If we look into details by each component, sample portion, time and error rate, then situation varies. Firstly, within each training sample size, the rank of performance of each model are about the same as by overall score. However, two exceptions are KNN and SVM. As sample size increasing, the rank of SVM drops from upper, to middle, then to bottom. Oppositely, KNN raises from middle to top 3. This suggests that, SVM might be outperformed when sample size increase to very large. Since sample size is closely related to implementing time, we secondly order the result by time and found that LDA dominates on any size. Classification tree follows, but in a cost of accuracy. Consistent with above, SVM drops to the bottom. This suggests that if we want to save time and also secure the accuracy, LDA would be one of top choices. In practical, people often care more about accuracy, especially when it is used to decision making. If we look into error rate, SVM comes to the top one, for each sample size; and random forest follows closely and ranked second for each size. Hence for our data, random forest is in general a better choice since we consider time along with accuracy.</p>
+
+<p>On all accounts, our result is data-specific and the scoring is based on our concern of problem. Practically, we have a lot more to concern. For example, if the data structure is necessarily complicated, then neural networks might be a good choice; if we need to explain the classification process and result to customers, tree-based algorithm might make more sense; if do care accuracy far more than time, we should definitely put more weight on accuracy. All of these will call for a different score criteria by adding more component or re-arrange the weights on each component. Even the performance of a single machine learning algorithm can be improved through different ways, like replacing the Euclidean distance in a KNN model by other distance functions may lead to better predictions. We can spend more time digging into the details in these algorithms, tuning parameters and modifying computation details. We could also spend more time on explorable analysis of our data to get a better idea of its special properties to shoot an algorithm more accurately. All in all, evaluation criterion and choice of our methods are based on every single detail of practice.</p>
+
+
+
+
+## References
+[1] Starkweather, J., Moske, A. <i>Multinomial Logistic Regression <i> <https://it.unt.edu/sites/default/files/mlr_jds_aug2011.pdf>  
+[2] Meyer, D., Technikum W. (2018). <i>Support Vector Machines * The Interface to libsvm in package e1071. <i>  
+[3] James, G., Witten, D., & Tibshirani, R. (2013). <i>An Introduction to Statistical Learning </i> (1st ed.). Springer.  
+[4]Paleologo, G., Elisseeff, A., & Antonini, G. (2010). <i>Subagging for credit scoring models. European Journal of Operational Research</i>, 201, 490-499.  
+[5] Hastie, T., Tibshirani, R., & Friedman, J. (2008). <i>The Elements of Statistical Learning: Data Mining, Inference, and Prediction</i> (second). Springer Series in Statistics.
