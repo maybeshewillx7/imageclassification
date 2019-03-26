@@ -548,7 +548,7 @@ report(score.sum(sumreport))
 
 ## References
 [1] Starkweather, J., Moske, A. <i>Multinomial Logistic Regression <i> <https://it.unt.edu/sites/default/files/mlr_jds_aug2011.pdf>  
-[2] Meyer, D., Technikum W. (2018). <i>Support Vector Machines * The Interface to libsvm in package e1071. <i>  
+[2] Meyer, D., Technikum W. (2018). <i>Support Vector Machines * The Interface to libsvm in package e1071. </i>  
 [3] James, G., Witten, D., & Tibshirani, R. (2013). <i>An Introduction to Statistical Learning </i> (1st ed.). Springer.  
 [4]Paleologo, G., Elisseeff, A., & Antonini, G. (2010). <i>Subagging for credit scoring models. European Journal of Operational Research</i>, 201, 490-499.  
 [5] Hastie, T., Tibshirani, R., & Friedman, J. (2008). <i>The Elements of Statistical Learning: Data Mining, Inference, and Prediction</i> (second). Springer Series in Statistics.
